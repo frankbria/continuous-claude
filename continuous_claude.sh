@@ -641,6 +641,8 @@ $notes_content
     
     enhanced_prompt+="$PROMPT_NOTES_GUIDELINES"
 
+    echo "🤖 $iteration_display Running Claude Code..." >&2
+    
     local result
     if ! result=$(run_claude_iteration "$enhanced_prompt" "$ADDITIONAL_FLAGS" "$ERROR_LOG"); then
         # Clean up branch on error
