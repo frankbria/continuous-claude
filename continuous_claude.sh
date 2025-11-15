@@ -296,7 +296,7 @@ run_claude_iteration() {
     local flags="$2"
     local error_log="$3"
     
-    claude -p "$prompt" $flags 2>"$error_log"
+    claude -p "$prompt" $flags 2> >(tee "$error_log" >&2)
 }
 
 parse_claude_result() {
@@ -398,11 +398,6 @@ execute_single_iteration() {
     if ! result=$(run_claude_iteration "$PROMPT" "$ADDITIONAL_FLAGS" "$ERROR_LOG"); then
         handle_iteration_error "$iteration_display" "exit_code" ""
         return 1
-    fi
-    
-    if [ -s "$ERROR_LOG" ]; then
-        echo "⚠️  $iteration_display Warnings or errors in stderr:" >&2
-        cat "$ERROR_LOG" >&2
     fi
     
     local parse_result=$(parse_claude_result "$result")
