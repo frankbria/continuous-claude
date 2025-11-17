@@ -43,6 +43,10 @@ GIT_BRANCH_PREFIX="continuous-claude/"
 MERGE_STRATEGY="squash"
 GITHUB_OWNER=""
 GITHUB_REPO=""
+WORKTREE_NAME=""
+WORKTREE_BASE_DIR="../continuous-claude-worktrees"
+CLEANUP_WORKTREE=false
+LIST_WORKTREES=false
 ERROR_LOG=""
 error_count=0
 extra_iterations=0
@@ -72,6 +76,10 @@ OPTIONAL FLAGS:
     --git-branch-prefix <prefix>  Branch prefix for iterations (default: "continuous-claude/")
     --merge-strategy <strategy>   PR merge strategy: squash, merge, or rebase (default: "squash")
     --notes-file <file>           Shared notes file for iteration context (default: "SHARED_TASK_NOTES.md")
+    --worktree <name>             Run in a git worktree for parallel execution (creates if needed)
+    --worktree-base-dir <path>    Base directory for worktrees (default: "../continuous-claude-worktrees")
+    --cleanup-worktree            Remove worktree after completion
+    --list-worktrees              List all active git worktrees and exit
 
 EXAMPLES:
     # Run 5 iterations to fix bugs
@@ -86,6 +94,20 @@ EXAMPLES:
     # Use custom branch prefix and merge strategy
     continuous-claude -p "Feature work" -m 10 --owner myuser --repo myproject \\
         --git-branch-prefix "ai/" --merge-strategy merge
+
+    # Run in a worktree for parallel execution
+    continuous-claude -p "Add unit tests" -m 5 --owner myuser --repo myproject --worktree instance-1
+
+    # Run multiple instances in parallel (in different terminals)
+    continuous-claude -p "Task A" -m 5 --owner myuser --repo myproject --worktree task-a
+    continuous-claude -p "Task B" -m 5 --owner myuser --repo myproject --worktree task-b
+
+    # List all active worktrees
+    continuous-claude --list-worktrees
+
+    # Clean up worktree after completion
+    continuous-claude -p "Quick fix" -m 1 --owner myuser --repo myproject \\
+        --worktree temp --cleanup-worktree
 
 REQUIREMENTS:
     - Claude Code CLI (https://claude.ai/code)
@@ -147,6 +169,22 @@ parse_arguments() {
             --notes-file)
                 NOTES_FILE="$2"
                 shift 2
+                ;;
+            --worktree)
+                WORKTREE_NAME="$2"
+                shift 2
+                ;;
+            --worktree-base-dir)
+                WORKTREE_BASE_DIR="$2"
+                shift 2
+                ;;
+            --cleanup-worktree)
+                CLEANUP_WORKTREE=true
+                shift
+                ;;
+            --list-worktrees)
+                LIST_WORKTREES=true
+                shift
                 ;;
             *)
                 # Collect unknown flags to forward to claude
@@ -613,6 +651,131 @@ continuous_claude_commit() {
     return 0
 }
 
+list_worktrees() {
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo "❌ Error: Not in a git repository" >&2
+        exit 1
+    fi
+    
+    echo "📋 Active Git Worktrees:"
+    echo ""
+    
+    if ! git worktree list 2>/dev/null; then
+        echo "❌ Error: Failed to list worktrees" >&2
+        exit 1
+    fi
+    
+    exit 0
+}
+
+setup_worktree() {
+    if [ -z "$WORKTREE_NAME" ]; then
+        # No worktree specified, work in current directory
+        return 0
+    fi
+    
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        echo "❌ Error: Not in a git repository. Worktrees require a git repository." >&2
+        exit 1
+    fi
+    
+    # Get the main repo directory
+    local main_repo_dir=$(git rev-parse --show-toplevel)
+    local worktree_path="${WORKTREE_BASE_DIR}/${WORKTREE_NAME}"
+    
+    # Make worktree path absolute if it's relative
+    if [[ "$worktree_path" != /* ]]; then
+        worktree_path="${main_repo_dir}/${worktree_path}"
+    fi
+    
+    # Get current branch (usually main or master)
+    local current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+    
+    # Check if worktree already exists
+    if [ -d "$worktree_path" ]; then
+        echo "🌿 Worktree '$WORKTREE_NAME' already exists at: $worktree_path" >&2
+        echo "📂 Switching to worktree directory..." >&2
+        
+        if ! cd "$worktree_path"; then
+            echo "❌ Error: Failed to change to worktree directory: $worktree_path" >&2
+            exit 1
+        fi
+        
+        echo "📥 Pulling latest changes from $current_branch..." >&2
+        if ! git pull origin "$current_branch" >/dev/null 2>&1; then
+            echo "⚠️  Warning: Failed to pull latest changes (continuing anyway)" >&2
+        fi
+    else
+        echo "🌿 Creating new worktree '$WORKTREE_NAME' at: $worktree_path" >&2
+        
+        # Create base directory if it doesn't exist
+        local base_dir=$(dirname "$worktree_path")
+        if [ ! -d "$base_dir" ]; then
+            mkdir -p "$base_dir" || {
+                echo "❌ Error: Failed to create worktree base directory: $base_dir" >&2
+                exit 1
+            }
+        fi
+        
+        # Create the worktree
+        if ! git worktree add "$worktree_path" "$current_branch" 2>&1; then
+            echo "❌ Error: Failed to create worktree" >&2
+            exit 1
+        fi
+        
+        echo "📂 Switching to worktree directory..." >&2
+        if ! cd "$worktree_path"; then
+            echo "❌ Error: Failed to change to worktree directory: $worktree_path" >&2
+            exit 1
+        fi
+    fi
+    
+    echo "✅ Worktree '$WORKTREE_NAME' ready at: $worktree_path" >&2
+    return 0
+}
+
+cleanup_worktree() {
+    if [ -z "$WORKTREE_NAME" ] || [ "$CLEANUP_WORKTREE" = "false" ]; then
+        return 0
+    fi
+    
+    if ! git rev-parse --git-dir > /dev/null 2>&1; then
+        return 0
+    fi
+    
+    local worktree_path="${WORKTREE_BASE_DIR}/${WORKTREE_NAME}"
+    
+    # Get the main repo directory to make path absolute
+    local main_repo_dir=$(git rev-parse --show-toplevel 2>/dev/null)
+    if [ -n "$main_repo_dir" ]; then
+        if [[ "$worktree_path" != /* ]]; then
+            worktree_path="${main_repo_dir}/${worktree_path}"
+        fi
+    fi
+    
+    echo "" >&2
+    echo "🗑️  Cleaning up worktree '$WORKTREE_NAME'..." >&2
+    
+    # Try to find the main repo
+    local current_dir=$(pwd)
+    local git_common_dir=$(git rev-parse --git-common-dir 2>/dev/null)
+    
+    if [ -n "$git_common_dir" ]; then
+        local main_repo=$(dirname "$git_common_dir")
+        if [ -d "$main_repo" ]; then
+            cd "$main_repo" 2>/dev/null || true
+        fi
+    fi
+    
+    # Remove the worktree
+    if git worktree remove "$worktree_path" --force 2>/dev/null; then
+        echo "✅ Worktree removed successfully" >&2
+    else
+        echo "⚠️  Warning: Failed to remove worktree (may need manual cleanup)" >&2
+        echo "   You can manually remove it with: git worktree remove $worktree_path --force" >&2
+    fi
+}
+
 get_iteration_display() {
     local iteration_num=$1
     local max_runs=$2
@@ -860,11 +1023,22 @@ main() {
     validate_arguments
     validate_requirements
     
+    # Handle --list-worktrees flag
+    if [ "$LIST_WORKTREES" = "true" ]; then
+        list_worktrees
+    fi
+    
+    # Setup worktree if specified
+    setup_worktree
+    
     ERROR_LOG=$(mktemp)
-    trap "rm -f $ERROR_LOG" EXIT
+    trap "rm -f $ERROR_LOG; cleanup_worktree" EXIT
     
     main_loop
     show_completion_summary
+    
+    # Cleanup worktree if requested
+    cleanup_worktree
 }
 
 if [ -z "$TESTING" ]; then

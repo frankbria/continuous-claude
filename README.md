@@ -123,6 +123,10 @@ continuous-claude --prompt "add unit tests until all code is covered" --max-cost
 - `--git-branch-prefix`: Prefix for git branch names (default: `continuous-claude/`)
 - `--notes-file`: Path to shared task notes file (default: `SHARED_TASK_NOTES.md`)
 - `--disable-commits`: Disable automatic git commits, PR creation, and merging (useful for testing)
+- `--worktree <name>`: Run in a git worktree for parallel execution (creates if needed)
+- `--worktree-base-dir <path>`: Base directory for worktrees (default: `../continuous-claude-worktrees`)
+- `--cleanup-worktree`: Remove worktree after completion
+- `--list-worktrees`: List all active git worktrees and exit
 
 Any additional flags you provide that are not recognized by `continuous-claude` will be automatically forwarded to the underlying `claude` command. For example, you can pass `--allowedTools`, `--model`, or any other Claude Code CLI flags.
 
@@ -161,6 +165,28 @@ continuous-claude -p "add features" -m 3 --owner AnandChowdhary --repo continuou
 
 # Use a different model
 continuous-claude -p "refactor code" -m 5 --owner AnandChowdhary --repo continuous-claude --model claude-haiku-4-5
+```
+
+### Running in parallel
+
+Use git worktrees to run multiple instances simultaneously without conflicts:
+
+```bash
+# Terminal 1
+continuous-claude -p "Add unit tests" -m 5 --owner myuser --repo myproject --worktree tests
+
+# Terminal 2 (simultaneously)
+continuous-claude -p "Add docs" -m 5 --owner myuser --repo myproject --worktree docs
+```
+
+Each instance creates its own worktree at `../continuous-claude-worktrees/<name>/`, pulls the latest changes, and runs independently. Worktrees persist for reuse.
+
+```bash
+# List worktrees
+continuous-claude --list-worktrees
+
+# Clean up after completion
+continuous-claude -p "task" -m 1 --owner user --repo project --worktree temp --cleanup-worktree
 ```
 
 ## 📊 Example output
