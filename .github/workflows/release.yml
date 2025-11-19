@@ -87,6 +87,48 @@ jobs:
           if [ "$LATEST_TAG" = "$NEW_VERSION" ]; then
             echo "⏭️  No new commits to release (version unchanged: $LATEST_TAG)"
             echo "should_release=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if continuous_claude.sh has changed since last tag
+          if [ "$LATEST_TAG" != "v0.0.0" ]; then
+            if ! git diff --quiet ${LATEST_TAG}..HEAD -- continuous_claude.sh; then
+              echo "✅ continuous_claude.sh has changed since $LATEST_TAG"
+              SCRIPT_CHANGED=true
+            else
+              echo "⏭️  continuous_claude.sh unchanged since $LATEST_TAG"
+              SCRIPT_CHANGED=false
+            fi
+          else
+            # First release, script is considered changed
+            SCRIPT_CHANGED=true
+          fi
+
+          # Get commits since last tag
+          if [ "$LATEST_TAG" = "v0.0.0" ]; then
+            COMMITS=$(git log --pretty=format:"%s" --no-merges)
+          else
+            COMMITS=$(git log ${LATEST_TAG}..HEAD --pretty=format:"%s" --no-merges)
+          fi
+
+          # Check if all commits are test/CI/docs related
+          # Test-related gitmojis: :construction_worker:, :white_check_mark:, :green_heart:, :pencil:
+          # Conventional commits: test:, ci:, docs:
+          TEST_ONLY=true
+          while IFS= read -r commit; do
+            if ! echo "$commit" | grep -qiE "^(:construction_worker:|:white_check_mark:|:green_heart:|:pencil:|test:|ci:|docs:)"; then
+              TEST_ONLY=false
+              break
+            fi
+          done <<< "$COMMITS"
+
+          # Skip release if script unchanged OR all commits are test-only
+          if [ "$SCRIPT_CHANGED" = "false" ]; then
+            echo "⏭️  Skipping release: continuous_claude.sh unchanged"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          elif [ "$TEST_ONLY" = "true" ]; then
+            echo "⏭️  Skipping release: only test/CI/docs changes"
+            echo "should_release=false" >> $GITHUB_OUTPUT
           else
             echo "✅ Will create release: $LATEST_TAG → $NEW_VERSION"
             echo "should_release=true" >> $GITHUB_OUTPUT
@@ -101,24 +143,6 @@ jobs:
           sed -i 's/^VERSION=".*"/VERSION="'"$NEW_VERSION"'"/' continuous_claude.sh
 
           echo "✅ Updated version to $NEW_VERSION in continuous_claude.sh"
-
-      - name: Commit version bump
-        if: steps.check_version.outputs.should_release == 'true'
-        run: |
-          NEW_VERSION="${{ steps.version_bump.outputs.new_version }}"
-
-          # Configure git
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # Stage and commit changes
-          git add continuous_claude.sh
-          git commit -m ":bookmark: Release version $NEW_VERSION"
-
-          # Push to main
-          git push origin main
-
-          echo "✅ Committed and pushed version bump to main"
 
       - name: Generate release notes
         id: release_notes
@@ -161,6 +185,77 @@ jobs:
 
           echo "Release notes generated"
           cat release_notes.md
+
+      - name: Generate CHANGELOG
+        if: steps.check_version.outputs.should_release == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          NEW_VERSION="${{ steps.version_bump.outputs.new_version }}"
+          
+          # Check if CHANGELOG.md exists
+          if [ ! -f CHANGELOG.md ]; then
+            echo "Creating new CHANGELOG.md..."
+            echo "# CHANGELOG" > CHANGELOG.md
+            echo "" >> CHANGELOG.md
+            
+            # Fetch all releases using gh api (because gh release list doesn't return body)
+            # We use jq to format the output
+            gh api repos/${{ github.repository }}/releases --paginate | jq -r '.[] | "## [" + .tag_name + "] - " + (.published_at | split("T")[0]) + "\n\n" + ((.body // "") | gsub("## "; "### ")) + "\n\n"' >> CHANGELOG.md
+          fi
+          
+          # Prepend new release notes to CHANGELOG.md
+          # We need to construct the new entry
+          DATE=$(date +%Y-%m-%d)
+          
+          # Create a temporary file for the new entry
+          cat > new_entry.md << EOF
+          ## [$NEW_VERSION] - $DATE
+
+          EOF
+          
+          # Append the body from release_notes.md (skipping the title if it's redundant, but our release_notes.md has headers)
+          # Our release_notes.md starts with "## What's Changed". 
+          # Let's just dump the whole release_notes.md content into the changelog entry for now.
+          # Replace ## with ### to maintain proper header hierarchy
+          sed 's/^## /### /' release_notes.md >> new_entry.md
+          echo "" >> new_entry.md
+          
+          # If CHANGELOG.md exists (which it should now), we need to insert new_entry.md after the header
+          # Assuming the first line is "# CHANGELOG"
+          
+          # Create a temp file with the header
+          echo "# CHANGELOG" > temp_changelog.md
+          echo "" >> temp_changelog.md
+          
+          # Add the new entry
+          cat new_entry.md >> temp_changelog.md
+          
+          # Add the rest of the existing changelog (skipping the first 2 lines: header and empty line)
+          tail -n +3 CHANGELOG.md >> temp_changelog.md || true
+          
+          # Replace CHANGELOG.md
+          mv temp_changelog.md CHANGELOG.md
+          
+          echo "✅ Updated CHANGELOG.md"
+
+      - name: Commit version bump
+        if: steps.check_version.outputs.should_release == 'true'
+        run: |
+          NEW_VERSION="${{ steps.version_bump.outputs.new_version }}"
+
+          # Configure git
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Stage and commit changes
+          git add continuous_claude.sh CHANGELOG.md
+          git commit -m ":bookmark: Release version $NEW_VERSION"
+
+          # Push to main
+          git push origin main
+
+          echo "✅ Committed and pushed version bump to main"
 
       - name: Create Release
         if: steps.check_version.outputs.should_release == 'true'

@@ -69,6 +69,7 @@ Using Claude Code to drive iterative development, this script fully automates th
 - Once checks pass and reviews are approved, the PR is merged
 - This process repeats until your task is complete
 - A `SHARED_TASK_NOTES.md` file maintains continuity by passing context between iterations, enabling seamless handoffs across AI and human developers
+- If multiple agents decide that the project is complete, the loop will stop early.
 
 ## 🚀 Quick start
 
@@ -142,6 +143,9 @@ continuous-claude --prompt "add unit tests until all code is covered" --max-cost
 - `--worktree-base-dir <path>`: Base directory for worktrees (default: `../continuous-claude-worktrees`)
 - `--cleanup-worktree`: Remove worktree after completion
 - `--list-worktrees`: List all active git worktrees and exit
+- `--dry-run`: Simulate execution without making changes
+- `--completion-signal <phrase>`: Phrase that agents output when entire project is complete (default: `CONTINUOUS_CLAUDE_PROJECT_COMPLETE`)
+- `--completion-threshold <num>`: Number of consecutive completion signals required to stop early (default: `3`)
 
 Any additional flags you provide that are not recognized by `continuous-claude` will be automatically forwarded to the underlying `claude` command. For example, you can pass `--allowedTools`, `--model`, or any other Claude Code CLI flags.
 
@@ -180,6 +184,12 @@ continuous-claude -p "add features" -m 3 --owner AnandChowdhary --repo continuou
 
 # Use a different model
 continuous-claude -p "refactor code" -m 5 --owner AnandChowdhary --repo continuous-claude --model claude-haiku-4-5
+
+# Enable early stopping when agents signal project completion
+continuous-claude -p "add unit tests to all files" -m 50 --owner AnandChowdhary --repo continuous-claude --completion-threshold 3
+
+# Use custom completion signal
+continuous-claude -p "fix all bugs" -m 20 --owner AnandChowdhary --repo continuous-claude --completion-signal "ALL_BUGS_FIXED" --completion-threshold 2
 ```
 
 ### Running in parallel

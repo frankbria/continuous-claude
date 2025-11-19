@@ -1,6 +1,6 @@
 #!/bin/bash
 
-VERSION="v0.5.1"
+VERSION="v0.7.0"
 
 ADDITIONAL_FLAGS="--dangerously-skip-permissions --output-format json"
 
@@ -15,6 +15,8 @@ PROMPT_WORKFLOW_CONTEXT="## CONTINUOUS WORKFLOW CONTEXT
 This is part of a continuous development loop where work happens incrementally across multiple iterations. You might run once, then a human developer might make changes, then you run again, and so on. This could happen daily or on any schedule.
 
 **Important**: You don't need to complete the entire goal in one iteration. Just make meaningful progress on one thing, then leave clear notes for the next iteration (human or AI). Think of it as a relay race where you're passing the baton.
+
+**Project Completion Signal**: If you determine that not just your current task but the ENTIRE project goal is fully complete (nothing more to be done on the overall goal), only include the exact phrase \"COMPLETION_SIGNAL_PLACEHOLDER\" in your response. Only use this when absolutely certain that the whole project is finished, not just your individual task. We will stop working on this project when multiple developers independently determine that the project is complete.
 
 ## PRIMARY GOAL"
 
@@ -47,11 +49,15 @@ WORKTREE_NAME=""
 WORKTREE_BASE_DIR="../continuous-claude-worktrees"
 CLEANUP_WORKTREE=false
 LIST_WORKTREES=false
+DRY_RUN=false
+COMPLETION_SIGNAL="CONTINUOUS_CLAUDE_PROJECT_COMPLETE"
+COMPLETION_THRESHOLD=3
 ERROR_LOG=""
 error_count=0
 extra_iterations=0
 successful_iterations=0
 total_cost=0
+completion_signal_count=0
 i=1
 EXTRA_CLAUDE_FLAGS=()
 
@@ -79,7 +85,11 @@ OPTIONAL FLAGS:
     --worktree <name>             Run in a git worktree for parallel execution (creates if needed)
     --worktree-base-dir <path>    Base directory for worktrees (default: "../continuous-claude-worktrees")
     --cleanup-worktree            Remove worktree after completion
+    --cleanup-worktree            Remove worktree after completion
     --list-worktrees              List all active git worktrees and exit
+    --dry-run                     Simulate execution without making changes
+    --completion-signal <phrase>  Phrase that agents output when project is complete (default: "CONTINUOUS_CLAUDE_PROJECT_COMPLETE")
+    --completion-threshold <num>  Number of consecutive signals to stop early (default: 3)
 
 EXAMPLES:
     # Run 5 iterations to fix bugs
@@ -108,6 +118,10 @@ EXAMPLES:
     # Clean up worktree after completion
     continuous-claude -p "Quick fix" -m 1 --owner myuser --repo myproject \\
         --worktree temp --cleanup-worktree
+
+    # Use completion signal to stop early when project is done
+    continuous-claude -p "Add unit tests to all files" -m 50 --owner myuser --repo myproject \\
+        --completion-threshold 3
 
 REQUIREMENTS:
     - Claude Code CLI (https://claude.ai/code)
@@ -186,6 +200,18 @@ parse_arguments() {
                 LIST_WORKTREES=true
                 shift
                 ;;
+            --dry-run)
+                DRY_RUN=true
+                shift
+                ;;
+            --completion-signal)
+                COMPLETION_SIGNAL="$2"
+                shift 2
+                ;;
+            --completion-threshold)
+                COMPLETION_THRESHOLD="$2"
+                shift 2
+                ;;
             *)
                 # Collect unknown flags to forward to claude
                 EXTRA_CLAUDE_FLAGS+=("$1")
@@ -223,6 +249,13 @@ validate_arguments() {
     if [[ ! "$MERGE_STRATEGY" =~ ^(squash|merge|rebase)$ ]]; then
         echo "❌ Error: --merge-strategy must be one of: squash, merge, rebase" >&2
         exit 1
+    fi
+
+    if [ -n "$COMPLETION_THRESHOLD" ]; then
+        if ! [[ "$COMPLETION_THRESHOLD" =~ ^[0-9]+$ ]] || [ "$COMPLETION_THRESHOLD" -lt 1 ]; then
+            echo "❌ Error: --completion-threshold must be a positive integer" >&2
+            exit 1
+        fi
     fi
 
     # Only require GitHub info if commits are enabled
@@ -532,6 +565,12 @@ create_iteration_branch() {
     
     echo "🌿 $iteration_display Creating branch: $branch_name" >&2
     
+    if [ "$DRY_RUN" = "true" ]; then
+        echo "   (DRY RUN) Would create branch $branch_name" >&2
+        echo "$branch_name"
+        return 0
+    fi
+    
     if ! git checkout -b "$branch_name" >/dev/null 2>&1; then
         echo "⚠️  $iteration_display Failed to create branch" >&2
         echo ""
@@ -568,6 +607,15 @@ continuous_claude_commit() {
         echo "🫙 $iteration_display No changes detected, cleaning up branch..." >&2
         git checkout "$main_branch" >/dev/null 2>&1
         git branch -D "$branch_name" >/dev/null 2>&1 || true
+        return 0
+    fi
+    
+    if [ "$DRY_RUN" = "true" ]; then
+        echo "💬 $iteration_display (DRY RUN) Would commit changes..." >&2
+        echo "📦 $iteration_display (DRY RUN) Changes committed on branch: $branch_name" >&2
+        echo "📤 $iteration_display (DRY RUN) Would push branch..." >&2
+        echo "🔨 $iteration_display (DRY RUN) Would create pull request..." >&2
+        echo "✅ $iteration_display (DRY RUN) PR merged and local branch cleaned up" >&2
         return 0
     fi
     
@@ -794,6 +842,12 @@ run_claude_iteration() {
     local flags="$2"
     local error_log="$3"
 
+    if [ "$DRY_RUN" = "true" ]; then
+        echo "🤖 (DRY RUN) Would run Claude Code with prompt: $prompt" >&2
+        echo "📝 (DRY RUN) Output: This is a simulated response from Claude Code." > "$error_log"
+        return 0
+    fi
+
     claude -p "$prompt" $flags "${EXTRA_CLAUDE_FLAGS[@]}" 2> >(tee "$error_log" >&2)
 }
 
@@ -860,6 +914,19 @@ handle_iteration_success() {
         echo "(no output)" >&2
     fi
 
+    # Check for completion signal in the output
+    if [ -n "$result_text" ] && [[ "$result_text" == *"$COMPLETION_SIGNAL"* ]]; then
+        completion_signal_count=$((completion_signal_count + 1))
+        echo "" >&2
+        echo "🎯 $iteration_display Completion signal detected ($completion_signal_count/$COMPLETION_THRESHOLD)" >&2
+    else
+        if [ $completion_signal_count -gt 0 ]; then
+            echo "" >&2
+            echo "🔄 $iteration_display Completion signal not found, resetting counter" >&2
+        fi
+        completion_signal_count=0
+    fi
+
     local cost=$(echo "$result" | jq -r '.total_cost_usd // empty')
     if [ -n "$cost" ]; then
         echo "" >&2
@@ -919,7 +986,7 @@ execute_single_iteration() {
         fi
     fi
 
-    local enhanced_prompt="$PROMPT_WORKFLOW_CONTEXT
+    local enhanced_prompt="${PROMPT_WORKFLOW_CONTEXT//COMPLETION_SIGNAL_PLACEHOLDER/$COMPLETION_SIGNAL}
 
 $PROMPT
 
@@ -997,6 +1064,13 @@ main_loop() {
             should_continue=false
         fi
         
+        # Stop if completion signal threshold reached
+        if [ $completion_signal_count -ge $COMPLETION_THRESHOLD ]; then
+            echo "" >&2
+            echo "🎉 Project completion signal detected $completion_signal_count times consecutively!" >&2
+            should_continue=false
+        fi
+        
         if [ "$should_continue" = "false" ]; then
             break
         fi
@@ -1009,7 +1083,14 @@ main_loop() {
 }
 
 show_completion_summary() {
-    if [ -n "$MAX_RUNS" ] && [ $MAX_RUNS -ne 0 ] || [ -n "$MAX_COST" ]; then
+    # Show completion signal message if that's why we stopped
+    if [ $completion_signal_count -ge $COMPLETION_THRESHOLD ]; then
+        if [ -n "$total_cost" ] && [ "$(awk "BEGIN {print ($total_cost > 0)}")" = "1" ]; then
+            printf "✨ Project completed! Detected completion signal %d times in a row. Total cost: \$%.3f\n" "$completion_signal_count" "$total_cost"
+        else
+            printf "✨ Project completed! Detected completion signal %d times in a row.\n" "$completion_signal_count"
+        fi
+    elif [ -n "$MAX_RUNS" ] && [ $MAX_RUNS -ne 0 ] || [ -n "$MAX_COST" ]; then
         if [ -n "$total_cost" ] && [ "$(awk "BEGIN {print ($total_cost > 0)}")" = "1" ]; then
             printf "🎉 Done with total cost: \$%.3f\n" "$total_cost"
         else 
